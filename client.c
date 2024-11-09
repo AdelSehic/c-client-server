@@ -12,11 +12,13 @@
 
 #define CHUNK_SIZE 1024
 
-#define CHUNK 262144
+/*#define CHUNK 262144*/
+#define CHUNK 4096
 
 int conn_to_server(struct sockaddr_in *server, int);
 int send_name(int, char *);
-int def(FILE *, FILE *, int);
+int compress_to_socket(FILE *, int, int);
+int send_compressed(int, unsigned char *, size_t);
 
 int main(int argc, char *argv[]) {
 
@@ -31,19 +33,6 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  FILE *deflated = fopen("deflated", "w");
-  if (!input) {
-    perror("Error opening the file");
-    return 1;
-  }
-
-  if (def(input, deflated, 9) != Z_OK) {
-    perror("Error compressing the file");
-    return 1;
-  }
-  fclose(deflated);
-  deflated = fopen("deflated", "r");
-
   int sock;
   struct sockaddr_in server;
   sock = conn_to_server(&server, 8080);
@@ -55,27 +44,14 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  char message[CHUNK_SIZE], reply[1000];
-  int read_size, read;
-  size_t transfered = 0;
-  while ((read = fread(message, sizeof(char), CHUNK_SIZE, deflated))) {
-    if (send(sock, message, read, 0) < 0) {
-      puts("Send failed");
-      return 1;
-    }
-    transfered += read;
-
-    if ((read_size = recv(sock, reply, 1000, 0)) < 0) {
-      puts("Recieve failed");
-      return 1;
-    }
+  int transfered = compress_to_socket(input, sock, 9);
+  if (transfered < 0) {
+    perror("Error compressing the file");
+    return 1;
   }
-
-  printf("Total bytes transferred - %zu\r\n", transfered);
+  printf("Transfer complete, sent %d bytes\r\n", transfered);
 
   fclose(input);
-  fclose(deflated);
-  remove("deflated");
   close(sock);
   return 0;
 }
@@ -116,12 +92,13 @@ int send_name(int sock, char *name) {
   return 0;
 }
 
-int def(FILE *source, FILE *dest, int level) {
-  int ret, flush;
+int compress_to_socket(FILE *source, int sock, int level) {
+  int ret, flush, transfered;
   unsigned have;
   z_stream strm;
+  int read;
   unsigned char in[CHUNK];
-  unsigned char out[CHUNK];
+  unsigned char *out;
 
   /* allocate deflate state */
   strm.zalloc = Z_NULL;
@@ -144,15 +121,14 @@ int def(FILE *source, FILE *dest, int level) {
     /* run deflate() on input until output buffer not full, finish
        compression if all of source has been read in */
     do {
+      out = malloc(CHUNK); // sizeof can be omitted
       strm.avail_out = CHUNK;
       strm.next_out = out;
       ret = deflate(&strm, flush);   /* no bad return value */
       assert(ret != Z_STREAM_ERROR); /* state not clobbered */
       have = CHUNK - strm.avail_out;
-      if (fwrite(out, 1, have, dest) != have || ferror(dest)) {
-        (void)deflateEnd(&strm);
-        return Z_ERRNO;
-      }
+      transfered += send_compressed(sock, out, have);
+      free(out);
     } while (strm.avail_out == 0);
     assert(strm.avail_in == 0); /* all input will be used */
 
@@ -162,5 +138,18 @@ int def(FILE *source, FILE *dest, int level) {
 
   /* clean up and return */
   (void)deflateEnd(&strm);
-  return Z_OK;
+  return transfered;
 }
+
+int send_compressed(int sock, unsigned char *buffer, size_t to_send) {
+  int read, transfered = 0;
+  if (send(sock, buffer, to_send, 0) < 0) {
+    puts("Send failed");
+    return -1;
+  }
+  if ((read = recv(sock, buffer, to_send, 0)) < 0) {
+    puts("Recieve failed");
+    return -1;
+  }
+  return to_send;
+};

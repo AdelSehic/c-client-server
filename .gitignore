@@ -1,2 +1,4 @@
 client
 server
+recv_*
+valgrind-out.txt

@@ -8,7 +8,8 @@
 #include <sys/socket.h> //socets
 #include <unistd.h>     //close
 
-#define CHUNK 262144
+/*#define CHUNK 262144*/
+#define CHUNK 4096
 
 FILE *open_write_file(int);
 int inf(FILE *src, FILE *dst);
