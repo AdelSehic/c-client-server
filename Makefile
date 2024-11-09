@@ -1,8 +1,14 @@
-client:
-	clang ./client.c -o client
+.PHONY: clean client server
 
-server:
-	clang ./server.c -o server
+all: client server
+
+FORCE:
+
+client: FORCE
+	clang ./client.c -o client -lz
+
+server: FORCE
+	clang ./server.c -o server -lz
 
 clean:
-	rm -f client
+	rm -f client server
