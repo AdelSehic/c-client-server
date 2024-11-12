@@ -12,7 +12,7 @@
 #define CHUNK 4096
 
 FILE *open_write_file(int);
-int inf(FILE *src, FILE *dst);
+int inf(int, FILE *);
 
 int main(int argc, char *argv[]) {
   int socket_desc, client_sock, c;
@@ -64,42 +64,16 @@ int main(int argc, char *argv[]) {
       return 1;
     }
 
-    FILE *data = fopen("data", "w");
-    if (!data) {
-      perror("couldn't open data file");
-      return 1;
-    }
-
     // Receive a message from client
     int offset = 0;
-    while ((read_size = recv(client_sock, client_message, 2000, 0)) > 0) {
-      // Send the message back to client
-      fwrite(client_message, sizeof(char), read_size, data);
-      offset += read_size;
-
-      send(client_sock, response, strlen(response), 0);
-    }
-    fclose(data);
-    data = fopen("data", "r+");
-    if (!data) {
-      perror("Coudln't open data again");
+    puts("Starting inflate function");
+    int rv = inf(client_sock, file);
+    if (rv < 0) {
+      perror("Inflate function error: ");
       return 1;
     }
+    printf("Inflate ended, recieved %d bytes in total\r\n", rv);
 
-    if (read_size == 0) {
-      puts("Client disconnected");
-      close(client_sock);
-      int expanded = inf(data, file);
-      if (expanded < 0) {
-        perror("Couldnt inflate the file");
-        return 1;
-      }
-      printf("Expanded byte cont: %d\r\n", expanded);
-    } else if (read_size == -1) {
-      puts("recv failed");
-    }
-
-    fclose(data);
     fclose(file);
     remove("data");
   }
@@ -120,7 +94,7 @@ FILE *open_write_file(int client_sock) {
   return fopen(fname, "w");
 };
 
-int inf(FILE *source, FILE *dest) {
+int inf(int sock, FILE *dest) {
   int ret;
   unsigned have;
   z_stream strm;
@@ -139,15 +113,25 @@ int inf(FILE *source, FILE *dest) {
 
   /* decompress until deflate stream ends or end of file */
   size_t total = 0;
+  unsigned char client_message[1024];
+  unsigned char *data;
   do {
-    strm.avail_in = fread(in, 1, CHUNK, source);
-    if (ferror(source)) {
+    data = malloc(CHUNK + 1024);
+    int rcv_total = 0, rcv_len;
+    do {
+      rcv_len = recv(sock, client_message, 1024, 0);
+      memcpy(data + rcv_total, client_message, rcv_len);
+      rcv_total += rcv_len;
+    } while (rcv_total < CHUNK && rcv_len);
+
+    strm.avail_in = rcv_total;
+    if (rcv_total <= 0) {
       (void)inflateEnd(&strm);
       return Z_ERRNO;
     }
     if (strm.avail_in == 0)
       break;
-    strm.next_in = in;
+    strm.next_in = data;
 
     /* run inflate() on input until output buffer not full */
     do {
@@ -170,7 +154,8 @@ int inf(FILE *source, FILE *dest) {
       }
       total += have;
     } while (strm.avail_out == 0);
-
+    
+    free(data);
     /* done when inflate() says it's done */
   } while (ret != Z_STREAM_END);
 

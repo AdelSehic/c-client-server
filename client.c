@@ -128,7 +128,6 @@ int compress_to_socket(FILE *source, int sock, int level) {
       assert(ret != Z_STREAM_ERROR); /* state not clobbered */
       have = CHUNK - strm.avail_out;
       transfered += send_compressed(sock, out, have);
-      free(out);
     } while (strm.avail_out == 0);
     assert(strm.avail_in == 0); /* all input will be used */
 
@@ -147,9 +146,6 @@ int send_compressed(int sock, unsigned char *buffer, size_t to_send) {
     puts("Send failed");
     return -1;
   }
-  if ((read = recv(sock, buffer, to_send, 0)) < 0) {
-    puts("Recieve failed");
-    return -1;
-  }
+  free(buffer);
   return to_send;
 };
