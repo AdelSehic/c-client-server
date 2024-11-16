@@ -2,13 +2,19 @@
 #include <arpa/inet.h> //inet_addr
 #include <assert.h>
 #include <fcntl.h>
+#include <mqueue.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>     //strlen
 #include <sys/socket.h> //socets
-#include <unistd.h>     //close
+#include <sys/stat.h>
+#include <unistd.h> //close
 
 #define CHUNK 4096
+#define MQ_NAME "/client_msg_queue"
+
+size_t transfered;
 
 int decompress_from_socket(int sock, FILE *dest) {
   int ret;
@@ -80,10 +86,15 @@ int decompress_from_socket(int sock, FILE *dest) {
   return ret == Z_STREAM_END ? total : Z_DATA_ERROR;
 }
 
-int send_compressed(int, unsigned char *, size_t);
+void *send_compressed(void *);
+
+struct send_data {
+  int sock;
+  mqd_t mq;
+};
 
 int compress_to_socket(FILE *source, int sock, int level) {
-  int ret, flush, transfered;
+  int ret, flush;
   unsigned have;
   z_stream strm;
   int read;
@@ -97,6 +108,27 @@ int compress_to_socket(FILE *source, int sock, int level) {
   ret = deflateInit(&strm, level);
   if (ret != Z_OK)
     return ret;
+
+  // make thread to send data and a channel to communiate to it
+
+  struct mq_attr attr;
+
+  attr.mq_flags = 0;
+  attr.mq_maxmsg = 64;
+  attr.mq_msgsize = CHUNK;
+  attr.mq_curmsgs = 0;
+
+  mqd_t mq = mq_open(MQ_NAME, O_CREAT | O_WRONLY, S_IRUSR | S_IWUSR, &attr);
+  if (mq == (mqd_t)-1) {
+    perror("mq_open failed");
+    return Z_ERRNO;
+  }
+  puts("opened message queue");
+
+  pthread_t socket_send_thread;
+  struct send_data *senddata = malloc(sizeof(struct send_data));
+  *senddata = (struct send_data){.mq = mq, .sock = sock};
+  pthread_create(&socket_send_thread, NULL, send_compressed, (void *)senddata);
 
   /* compress until end of file */
   do {
@@ -117,7 +149,9 @@ int compress_to_socket(FILE *source, int sock, int level) {
       ret = deflate(&strm, flush);   /* no bad return value */
       assert(ret != Z_STREAM_ERROR); /* state not clobbered */
       have = CHUNK - strm.avail_out;
-      transfered += send_compressed(sock, out, have);
+      struct send_data *senddata = malloc(sizeof(struct send_data));
+      mq_send(mq, (char *)out, have, 1);
+
     } while (strm.avail_out == 0);
     assert(strm.avail_in == 0); /* all input will be used */
 
@@ -127,15 +161,37 @@ int compress_to_socket(FILE *source, int sock, int level) {
 
   /* clean up and return */
   (void)deflateEnd(&strm);
+  mq_close(mq);
   return transfered;
 }
 
-int send_compressed(int sock, unsigned char *buffer, size_t to_send) {
-  int read, transfered = 0;
-  if (send(sock, buffer, to_send, 0) < 0) {
-    puts("Send failed");
-    return -1;
+void *send_compressed(void *args) {
+
+  struct send_data *conn = (struct send_data *)args;
+
+  size_t rcv, msg_rcv;
+  char msgbuf[CHUNK];
+
+  struct mq_attr attr;
+
+  attr.mq_flags = 0;
+  attr.mq_maxmsg = 64;
+  attr.mq_msgsize = CHUNK;
+  attr.mq_curmsgs = 0;
+
+  mqd_t queue = mq_open(MQ_NAME, O_CREAT | O_RDONLY, S_IRUSR | S_IWUSR, &attr);
+
+  while (1) {
+    rcv = mq_receive(queue, msgbuf, CHUNK, NULL);
+    if (rcv >= 0) {
+      int read = send(conn->sock, msgbuf, rcv, 0);
+      if (read < 0) {
+        puts("Send failed");
+      }
+
+      transfered += read;
+    } else {
+      perror("mq_recieve failed");
+    }
   }
-  free(buffer);
-  return to_send;
 };
